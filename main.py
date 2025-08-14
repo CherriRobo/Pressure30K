@@ -43,7 +43,7 @@ async def on_ready():
     #DND and status.
     await bot.change_presence(
         status=discord.Status.dnd,
-        activity=discord.CustomActivity(name="Pressure30k is a gnome (4ft2) who is Bronze ranked in Apex Legends.")
+        activity=discord.CustomActivity(name="Watching over the server.")
     )
 
 #Load cogs.
