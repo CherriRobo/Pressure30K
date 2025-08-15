@@ -6,6 +6,8 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import asyncio
+import logging
+logging.basicConfig(level=logging.INFO)
 
 #Load env.
 load_dotenv()

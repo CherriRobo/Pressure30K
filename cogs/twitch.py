@@ -7,6 +7,7 @@ import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 from datetime import datetime, timedelta, timezone
+import logging
 
 #Load env.
 TWITCH_CLIENT = os.getenv("TWITCH_CLIENT")
@@ -16,11 +17,14 @@ TWITCH_LIVE = int(os.getenv("TWITCH_LIVE", "0"))
 TWITCH_POLL = int(os.getenv("TWITCH_POLL", "120"))
 SERVER_ID = int(os.getenv("SERVER_ID", "0")) or None
 CLIP_CHANNEL = int(os.getenv("CLIP_CHANNEL", "0"))
-CLIP_POLL = int(os.getenv("CLIP_POLL", "300")) 
+CLIP_POLL = int(os.getenv("CLIP_POLL", "300"))
 CLIP_WINDOW_MIN = int(os.getenv("CLIP_WINDOW_MIN", "60"))
 
 #Helix.
 HELIX = "https://api.twitch.tv/helix"
+
+#Logger.
+log = logging.getLogger("twitch_cog")
 
 #Cogs.
 class TwitchCog(commands.Cog):
@@ -31,6 +35,7 @@ class TwitchCog(commands.Cog):
         self.token_expiry_ts: float = 0.0
         self.live_cache: set[str] = set()
         self.clip_checkpoint: dict[str, datetime] = {}
+        log.info("TwitchCog init. CLIP_CHANNEL=%s STREAMERS=%s", CLIP_CHANNEL, TWITCH_STREAMER)
         self.check_streams.start()
         if CLIP_CHANNEL and TWITCH_STREAMER:
             self.check_clips.start()
@@ -43,7 +48,12 @@ class TwitchCog(commands.Cog):
         if not (TWITCH_CLIENT and TWITCH_SECRET and TWITCH_LIVE and TWITCH_STREAMER):
             return
         channel = self.bot.get_channel(TWITCH_LIVE)
-        if not isinstance(channel, discord.TextChannel):
+        if not channel:
+            try:
+                channel = await self.bot.fetch_channel(TWITCH_LIVE)
+            except Exception:
+                return
+        if not hasattr(channel, "send"):
             return
         try:
             streams = await self._fetch_streams(TWITCH_STREAMER)
@@ -91,6 +101,7 @@ class TwitchCog(commands.Cog):
             self.token = data.get("access_token")
             expires_in = int(data.get("expires_in", 3600))
             self.token_expiry_ts = time.time() + expires_in
+            log.info("Twitch token refreshed (expires_in=%ss)", expires_in)
 
     #Return the headers.
     async def _helix_headers(self):
@@ -118,18 +129,12 @@ class TwitchCog(commands.Cog):
         params = [("login", u) for u in logins]
         async with sess.get(f"{HELIX}/users", params=params, headers=await self._helix_headers(), timeout=20) as r:
             data = await r.json()
-            users = {u["login"].lower(): u for u in data.get("data", [])}
-            return users
+            return {u["login"].lower(): u for u in data.get("data", [])}
 
     #Fetch user data.
     async def _fetch_broadcaster_ids(self, logins: list[str]) -> dict[str, str]:
         users = await self._fetch_users(logins)
-        out = {}
-        for login, u in users.items():
-            bid = u.get("id")
-            if bid:
-                out[login] = bid
-        return out
+        return {login: u.get("id") for login, u in users.items() if u.get("id")}
 
     #Fetch clips since a timestamp.
     async def _fetch_clips(self, broadcaster_id: str, started_at_iso: str):
@@ -137,7 +142,7 @@ class TwitchCog(commands.Cog):
         params = {
             "broadcaster_id": broadcaster_id,
             "started_at": started_at_iso,
-            "first": 20,  #20 per page.
+            "first": 20,
         }
         async with sess.get(f"{HELIX}/clips", params=params, headers=await self._helix_headers(), timeout=20) as r:
             data = await r.json()
@@ -148,7 +153,7 @@ class TwitchCog(commands.Cog):
         return f"https://static-cdn.jtvnw.net/previews-ttv/live_user_{streamer_login}-1280x720.jpg"
 
     #Live announcement.
-    async def _announce(self, channel: discord.TextChannel, stream, user):
+    async def _announce(self, channel, stream, user):
         login = user["login"].lower()
         title = stream.get("title") or "Live on Twitch!"
         game = stream.get("game_name") or "Just Chatting"
@@ -160,7 +165,6 @@ class TwitchCog(commands.Cog):
         )
         embed.set_thumbnail(url=user.get("profile_image_url") or discord.Embed.Empty)
 
-        #Sends live notificaiton and pings.
         await channel.send(
             content=f"🔴 **{user.get('display_name')}** is live! Come join in and chat! <@&1405373110143684618>",
             embed=embed,
@@ -186,26 +190,37 @@ class TwitchCog(commands.Cog):
             return
 
         ch = self.bot.get_channel(CLIP_CHANNEL)
-        if not isinstance(ch, discord.TextChannel):
+        if not ch:
+            try:
+                ch = await self.bot.fetch_channel(CLIP_CHANNEL)
+            except Exception:
+                return
+
+        if isinstance(ch, discord.Thread):
+            try:
+                if ch.archived:
+                    await ch.unarchive()
+                if not ch.me:
+                    await ch.join()
+            except Exception:
+                pass
+
+        if not hasattr(ch, "send"):
             return
 
         try:
-            #Streamer IDs.
             ids = await self._fetch_broadcaster_ids(TWITCH_STREAMER)
             now = datetime.now(timezone.utc)
 
             for login, bid in ids.items():
-                #Clip starting point.
                 since = self.clip_checkpoint.get(login)
                 if since is None:
                     since = now - timedelta(minutes=CLIP_WINDOW_MIN)
                 started_at_iso = since.isoformat().replace("+00:00", "Z")
                 clips = await self._fetch_clips(bid, started_at_iso)
 
-                #Old to new.
                 def parse_ts(c):
                     try:
-                        #Created at said time.
                         return datetime.fromisoformat(c["created_at"].replace("Z", "+00:00"))
                     except Exception:
                         return since
@@ -221,7 +236,9 @@ class TwitchCog(commands.Cog):
                     title = clip.get("title") or "New clip"
                     creator = clip.get("creator_name") or "Someone"
                     thumb = clip.get("thumbnail_url")
-                    game = clip.get("game_id")
+
+                    if thumb and "{width}" in thumb:
+                        thumb = thumb.replace("{width}", "1280").replace("{height}", "720")
 
                     embed = discord.Embed(
                         title=f"🎬 New clip, check it out!: {title}",
@@ -233,15 +250,19 @@ class TwitchCog(commands.Cog):
                     embed.add_field(name="Watch", value=url, inline=False)
                     embed.set_footer(text=f"{login}")
 
-                    await ch.send(embed=embed)
+                    try:
+                        await ch.send(embed=embed)
+                    except discord.Forbidden:
+                        await ch.send(f"🎬 New clip by **{creator}** — {url}")
+                    except Exception:
+                        pass
+
                     if created_at > latest_seen:
                         latest_seen = created_at
 
-                #Update.
                 self.clip_checkpoint[login] = latest_seen
 
         except Exception:
-            #Loop alive errors.
             pass
 
     #Ensure bot ready before clips loop.
