@@ -37,11 +37,6 @@ async def on_ready():
     except Exception as e:
         logging.exception("Slash command sync failed :( see: ", e)
 
-    # Twitch check on start-up.
-    twitch_cog = bot.get_cog("TwitchCog")
-    if twitch_cog:
-        await twitch_cog.trigger_now()
-
     #DND and status.
     await bot.change_presence(
         status=discord.Status.dnd,
