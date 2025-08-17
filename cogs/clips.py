@@ -4,7 +4,6 @@ import discord
 from discord.ext import commands, tasks
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List
-from twitch_api import TwitchAPI
 
 #Load env.
 TWITCH_STREAMER: List[str] = [s.strip().lower() for s in os.getenv("TWITCH_STREAMER", "").split(",") if s.strip()]
@@ -14,9 +13,9 @@ CLIP_WINDOW_MIN: int = int(os.getenv("CLIP_WINDOW_MIN", "60"))
 
 #Cogs.
 class ClipsCog(commands.Cog):
-    def __init__(self, bot: commands.Bot, api: TwitchAPI):
+    def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.api = api
+        self.api = bot.twitch_api
         self.clip_checkpoint: Dict[str, datetime] = {}
         self._broadcaster_ids: Dict[str, str] = {}
         if CLIP_CHANNEL and TWITCH_STREAMER:
@@ -102,3 +101,6 @@ class ClipsCog(commands.Cog):
     @check_clips.before_loop
     async def before_check_clips(self):
         await self.bot.wait_until_ready()
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(ClipsCog(bot))

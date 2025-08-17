@@ -1,10 +1,8 @@
-#Imports.
+# Imports.
 import os
 import discord
 from discord.ext import commands, tasks
-from datetime import datetime, timezone
 from typing import Dict, List, Set
-from twitch_api import TWITCHAPI
 
 #Load env.
 TWITCH_STREAMER: List[str] = [s.strip().lower() for s in os.getenv("TWITCH_STREAMER", "").split(",") if s.strip()]
@@ -13,13 +11,13 @@ TWITCH_POLL: int = int(os.getenv("TWITCH_POLL", "120"))
 
 #Cogs.
 class LiveAnnouncerCog(commands.Cog):
-    def __init__(self, bot: commands.Bot, api: TWITCHAPI):
+    def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.api = api
+        self.api = bot.twitch_api
         self.last_live_started_at: Dict[str, str] = {}
         self.live_cache: Set[str] = set()
         self.check_streams.start()
-    
+
     async def _announce(self, channel, stream, user):
         login = user["login"].lower()
         title = stream.get("title") or "Live on Twitch!"
@@ -106,3 +104,6 @@ class LiveAnnouncerCog(commands.Cog):
                 await ctx.send("ℹ Nothing new to announce (already announced this session).")
         except Exception as e:
             await ctx.send(f"Livecheck error :( see: `{e}`")
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(LiveAnnouncerCog(bot))
