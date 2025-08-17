@@ -1,15 +1,17 @@
 #Imports.
 import os
+import json
 import discord
 from discord.ext import commands, tasks
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List
+from typing import Dict, List, Set
 
 #Load env.
 TWITCH_STREAMER: List[str] = [s.strip().lower() for s in os.getenv("TWITCH_STREAMER", "").split(",") if s.strip()]
 CLIP_CHANNEL: int = int(os.getenv("CLIP_CHANNEL", "0"))
 CLIP_POLL: int = int(os.getenv("CLIP_POLL", "300"))
 CLIP_WINDOW_MIN: int = int(os.getenv("CLIP_WINDOW_MIN", "60"))
+BACKLOG_FILE: str = "backlog_clips.json"
 
 #Cogs.
 class ClipsCog(commands.Cog):
@@ -18,13 +20,48 @@ class ClipsCog(commands.Cog):
         self.api = bot.twitch_api
         self.clip_checkpoint: Dict[str, datetime] = {}
         self._broadcaster_ids: Dict[str, str] = {}
+        self.seen: Dict[str, Set[str]] = {}
+
+        self._load_backlog()
+
         if CLIP_CHANNEL and TWITCH_STREAMER:
             self.check_clips.start()
 
+    #Backlog load/save.
+    def _load_backlog(self):
+        try:
+            if os.path.exists(BACKLOG_FILE):
+                with open(BACKLOG_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self.seen = {k.lower(): set(v) for k, v in data.get("seen", {}).items()}
+            else:
+                self.seen = {}
+        except Exception:
+            self.seen = {}
+
+    def _save_backlog(self):
+        try:
+            payload = {"seen": {k: sorted(list(v)) for k, v in self.seen.items()}}
+            with open(BACKLOG_FILE, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    #Helpers.
     async def _ensure_broadcaster_ids(self):
         if not self._broadcaster_ids:
             self._broadcaster_ids = await self.api.fetch_broadcaster_ids(TWITCH_STREAMER)
 
+    def _is_seen(self, login: str, clip_id: str) -> bool:
+        return clip_id in self.seen.get(login.lower(), set())
+
+    def _mark_seen(self, login: str, clip_id: str):
+        login = login.lower()
+        if login not in self.seen:
+            self.seen[login] = set()
+        self.seen[login].add(clip_id)
+
+    #Tasks.
     @tasks.loop(seconds=CLIP_POLL)
     async def check_clips(self):
         await self.bot.wait_until_ready()
@@ -60,10 +97,22 @@ class ClipsCog(commands.Cog):
 
                 clips.sort(key=parse_ts)
                 latest_seen = since
+                posted = False
 
                 for clip in clips:
+                    clip_id = clip.get("id")
+                    if not clip_id:
+                        continue
+                    if self._is_seen(login, clip_id):
+                        ts = parse_ts(clip)
+                        if ts > latest_seen:
+                            latest_seen = ts
+                        continue
+
                     created_at = parse_ts(clip)
                     if created_at <= since:
+                        if created_at > latest_seen:
+                            latest_seen = created_at
                         continue
 
                     url = clip.get("url")
@@ -74,7 +123,7 @@ class ClipsCog(commands.Cog):
                         thumb = thumb.replace("{width}", "1280").replace("{height}", "720")
 
                     embed = discord.Embed(
-                        title=f"🎬 New clip, check it out!: {title}",
+                        title=f"🎬 New clip: {title}",
                         description=f"By **{creator}** — [{login} on Twitch]({f'https://twitch.tv/{login}'})",
                         timestamp=created_at,
                     )
@@ -87,14 +136,21 @@ class ClipsCog(commands.Cog):
                     try:
                         await ch.send(embed=embed)
                     except discord.Forbidden:
-                        await ch.send(f"🎬 New clip by **{creator}** — {url}")
+                        if url:
+                            await ch.send(f"🎬 New clip by **{creator}** — {url}")
+                        else:
+                            await ch.send(f"🎬 New clip by **{creator}**")
                     except Exception:
-                        pass
+                        continue
 
+                    self._mark_seen(login, clip_id)
+                    posted = True
                     if created_at > latest_seen:
                         latest_seen = created_at
 
                 self.clip_checkpoint[login] = latest_seen
+                if posted:
+                    self._save_backlog()
         except Exception:
             pass
 
