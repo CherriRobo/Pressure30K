@@ -45,7 +45,7 @@ async def on_ready():
 
 #Load cogs.
 async def setup_cogs():
-    for ext in ("cogs.welcome","cogs.twitch", "cogs.embed", "cogs.reaction_roles", "cogs.autorole", "cogs.ban_kick"):
+    for ext in ("cogs.welcome","cogs.twitch_api", "cogs.embed", "cogs.reaction_roles", "cogs.autorole", "cogs.ban_kick", "cogs.live"):
         try:
             await bot.load_extension(ext)
             logging.info(f"Loaded {ext}!")
